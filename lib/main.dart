@@ -94,7 +94,7 @@ class Player {
 
 class Round {
   final String id;
-  final int roundNumber;
+  int roundNumber;
   final Map<String, List<ScoreEntry>> scores;
   final DateTime timestamp;
 
@@ -452,6 +452,7 @@ class GameDetailScreen extends StatefulWidget {
 
 class _GameDetailScreenState extends State<GameDetailScreen> {
   late Game game;
+  bool isEditMode = false;
   final TextEditingController _teamNameController = TextEditingController();
 
   @override
@@ -581,6 +582,17 @@ class _GameDetailScreenState extends State<GameDetailScreen> {
     _saveGame();
   }
 
+  void _deleteTeam(Player player) {
+    setState(() {
+      game.players.remove(player);
+      // Remove all scores for this player from all rounds
+      for (final round in game.rounds) {
+        round.scores.remove(player.id);
+      }
+    });
+    _saveGame();
+  }
+
   void _addNewRound() {
     final newRound = Round(
       id: const Uuid().v4(),
@@ -595,6 +607,54 @@ class _GameDetailScreenState extends State<GameDetailScreen> {
       game.rounds.add(newRound);
     });
     _saveGame();
+  }
+
+  void _deleteRound(Round round) {
+    setState(() {
+      game.rounds.remove(round);
+      // Renumber remaining rounds
+      for (int i = 0; i < game.rounds.length; i++) {
+        game.rounds[i].roundNumber = i + 1;
+      }
+    });
+    _saveGame();
+  }
+
+  void _deleteGame() {
+    showCupertinoDialog(
+      context: context,
+      builder: (context) => CupertinoAlertDialog(
+        title: const Text('Delete Game'),
+        content: const Text('Are you sure you want to delete this game? This action cannot be undone.'),
+        actions: [
+          CupertinoDialogAction(
+            child: const Text('Cancel'),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+          CupertinoDialogAction(
+            isDestructiveAction: true,
+            child: const Text('Delete'),
+            onPressed: () async {
+              Navigator.of(context).pop();
+              final prefs = await SharedPreferences.getInstance();
+              final gamesJson = prefs.getStringList('games') ?? [];
+              
+              // Remove the current game
+              gamesJson.removeWhere((json) {
+                final gameData = jsonDecode(json);
+                return gameData['id'] == game.id;
+              });
+              
+              await prefs.setStringList('games', gamesJson);
+              widget.onGameUpdated();
+              
+              // Navigate back to the game list
+              Navigator.of(context).pop();
+            },
+          ),
+        ],
+      ),
+    );
   }
 
   void _addScore(Round round, Player player) {
@@ -763,6 +823,53 @@ class _GameDetailScreenState extends State<GameDetailScreen> {
     return runningTotal;
   }
 
+  double _getLargestNumberInColumn(Player player) {
+    double maxWidth = 0.0;
+    
+    // Check all rounds for this player's scores
+    for (final round in game.rounds) {
+      final playerScores = round.scores[player.id] ?? [];
+      for (final score in playerScores) {
+        final scoreText = '${score.score}';
+        final textPainter = TextPainter(
+          text: TextSpan(
+            text: scoreText,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        );
+        textPainter.layout();
+        maxWidth = math.max(maxWidth, textPainter.width);
+      }
+      
+      // Also check the running total
+      final total = _calculateRoundSubtotal(round, player);
+      final totalText = '$total';
+      final totalPainter = TextPainter(
+        text: TextSpan(
+          text: totalText,
+          style: const TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      );
+      totalPainter.layout();
+      maxWidth = math.max(maxWidth, totalPainter.width);
+    }
+    
+    return maxWidth;
+  }
+
+  double _getColumnWidth(Player player) {
+    final maxWidth = _getLargestNumberInColumn(player);
+    return math.max(110.0, maxWidth + 20.0);
+  }
+
   @override
   Widget build(BuildContext context) {
     return CupertinoPageScaffold(
@@ -771,10 +878,24 @@ class _GameDetailScreenState extends State<GameDetailScreen> {
           onTap: _editGameName,
           child: Text(game.name),
         ),
-        trailing: CupertinoButton(
-          padding: EdgeInsets.zero,
-          child: const Icon(CupertinoIcons.person_add),
-          onPressed: _showAddTeamDialog,
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CupertinoButton(
+              padding: EdgeInsets.zero,
+              child: Text(isEditMode ? 'Done' : 'Edit'),
+              onPressed: () {
+                setState(() {
+                  isEditMode = !isEditMode;
+                });
+              },
+            ),
+            CupertinoButton(
+              padding: EdgeInsets.zero,
+              child: const Icon(CupertinoIcons.person_add),
+              onPressed: _showAddTeamDialog,
+            ),
+          ],
         ),
       ),
       child: SafeArea(
@@ -812,285 +933,429 @@ class _GameDetailScreenState extends State<GameDetailScreen> {
                   ],
                 ),
               )
-            : Container(
-                margin: const EdgeInsets.all(16),
-                decoration: const BoxDecoration(
-                  color: Color(0xFFFEFEFE),
-                ),
-                child: Column(
-                  children: [
-                    // Header row with team names
-                    Container(
-                      height: 60,
-                      decoration: const BoxDecoration(
-                        border: Border(
-                          bottom: BorderSide(
-                            color: Color(0xFF2C2C2C),
-                            width: 2.0,
-                          ),
-                        ),
-                      ),
-                      child: Row(
-                        children: [
-                          // Empty corner cell
-                          Container(
-                            width: 100,
-                            decoration: const BoxDecoration(
-                              border: Border(
-                                right: BorderSide(
-                                  color: Color(0xFF2C2C2C),
-                                  width: 2.0,
+            : Column(
+                children: [
+                  // Scrollable scoresheet content
+                  Expanded(
+                    child: game.rounds.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(
+                                  CupertinoIcons.chart_bar,
+                                  size: 48,
+                                  color: const Color(0xFF8B8B8B),
                                 ),
-                              ),
-                            ),
-                          ),
-                          // Team name columns
-                          ...game.players.map((player) => Expanded(
-                            child: Container(
-                              decoration: const BoxDecoration(
-                                border: Border(
-                                  right: BorderSide(
-                                    color: Color(0xFF2C2C2C),
-                                    width: 1.0,
-                                  ),
-                                ),
-                              ),
-                              child: Center(
-                                child: Text(
-                                  player.name,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
+                                const SizedBox(height: 16),
+                                const Text(
+                                  'No rounds yet',
+                                  style: TextStyle(
                                     fontSize: 16,
-                                    color: Color(0xFF2C2C2C),
+                                    color: Color(0xFF8B8B8B),
                                   ),
-                                  textAlign: TextAlign.center,
                                 ),
-                              ),
+                                const SizedBox(height: 8),
+                                const Text(
+                                  'Add a round to start scoring!',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: Color(0xFF8B8B8B),
+                                  ),
+                                ),
+                                const SizedBox(height: 24),
+                                CupertinoButton.filled(
+                                  child: const Text('Add Round'),
+                                  onPressed: _addNewRound,
+                                ),
+                              ],
                             ),
-                          )).toList(),
-                        ],
-                      ),
-                    ),
-                    
-                    // Rounds section
-                    Expanded(
-                      child: game.rounds.isEmpty
-                          ? Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(
-                                    CupertinoIcons.chart_bar,
-                                    size: 48,
-                                    color: const Color(0xFF8B8B8B),
+                          )
+                        : Container(
+                            color: const Color(0xFFFEFEFE),
+                            child: SingleChildScrollView(
+                              scrollDirection: Axis.vertical,
+                              child: SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child:                                 CustomPaint(
+                                  painter: TableGridPainter(
+                                    players: game.players,
+                                    rounds: game.rounds,
+                                    getColumnWidth: _getColumnWidth,
+                                    isEditMode: isEditMode,
                                   ),
-                                  const SizedBox(height: 16),
-                                  const Text(
-                                    'No rounds yet',
-                                    style: TextStyle(
-                                      fontSize: 16,
-                                      color: Color(0xFF8B8B8B),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  const Text(
-                                    'Add a round to start scoring!',
-                                    style: TextStyle(
-                                      fontSize: 14,
-                                      color: Color(0xFF8B8B8B),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 24),
-                                  CupertinoButton.filled(
-                                    child: const Text('Add Round'),
-                                    onPressed: _addNewRound,
-                                  ),
-                                ],
-                              ),
-                            )
-                          : Column(
-                              children: List.generate(game.rounds.length * 2, (index) {
-                                final roundIndex = index ~/ 2;
-                                final isSubtotal = index % 2 == 1;
-                                final round = game.rounds[roundIndex];
-                              
-                                if (isSubtotal) {
-                                  // Subtotal row
-                                  return Container(
-                                    height: 50,
-                                    decoration: const BoxDecoration(
-                                      border: Border(
-                                        top: BorderSide(
-                                          color: Color(0xFF2C2C2C),
-                                          width: 1.0,
-                                        ),
-                                        bottom: BorderSide(
-                                          color: Color(0xFF2C2C2C),
-                                          width: 1.0,
-                                        ),
-                                      ),
-                                    ),
-                                    child: Row(
-                                      children: [
-                                        // Subtotal label
-                                        Container(
-                                          width: 100,
-                                          decoration: const BoxDecoration(
-                                            border: Border(
-                                              right: BorderSide(
-                                                color: Color(0xFF2C2C2C),
-                                                width: 2.0,
-                                              ),
-                                            ),
-                                          ),
-                                          child: const Center(
-                                            child: Text(
-                                              'Total',
-                                              style: TextStyle(
-                                                fontWeight: FontWeight.bold,
-                                                fontSize: 14,
-                                                color: Color(0xFF2C2C2C),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                        // Subtotal values
-                                        ...game.players.map((player) => Expanded(
-                                          child: Container(
-                                            decoration: const BoxDecoration(
-                                              border: Border(
-                                                right: BorderSide(
-                                                  color: Color(0xFF2C2C2C),
-                                                  width: 1.0,
-                                                ),
-                                              ),
-                                            ),
-                                            child: Center(
-                                              child: Text(
-                                                '${_calculateRoundSubtotal(round, player)}',
-                                                style: const TextStyle(
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: 16,
-                                                  color: Color(0xFF2C2C2C),
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                        )).toList(),
-                                      ],
-                                    ),
-                                  );
-                                } else {
-                                  // Scores row
-                                  final maxScores = game.players.fold<int>(0, (max, player) {
-                                    final playerScores = round.scores[player.id] ?? [];
-                                    return playerScores.length > max ? playerScores.length : max;
-                                  });
-                                  
-                                  final rowHeight = math.max(100.0, (maxScores + 1) * 35.0);
-                                  
-                                  return Container(
-                                    height: rowHeight,
-                                    child: Row(
-                                      children: [
-                                        // Round label
-                                        Container(
-                                          width: 100,
-                                          decoration: const BoxDecoration(
-                                            border: Border(
-                                              right: BorderSide(
-                                                color: Color(0xFF2C2C2C),
-                                                width: 2.0,
-                                              ),
-                                            ),
-                                          ),
-                                          child: Center(
-                                            child: Text(
-                                              'Round ${round.roundNumber}',
-                                              style: const TextStyle(
-                                                fontWeight: FontWeight.bold,
-                                                fontSize: 14,
-                                                color: Color(0xFF2C2C2C),
-                                              ),
-                                            ),
-                                          ),
-                                        ),
-                                        // Score cells
-                                        ...game.players.map((player) {
-                                          final playerScores = round.scores[player.id] ?? [];
-                                          return Expanded(
-                                            child: Container(
-                                              decoration: const BoxDecoration(
-                                                border: Border(
-                                                  right: BorderSide(
+                                  child: Column(
+                                    children: [
+                                      // Header row with team names
+                                      Container(
+                                        height: isEditMode ? 90 : 60,
+                                        child: Row(
+                                          children: [
+                                            // Empty corner cell
+                                            Container(
+                                              width: 100,
+                                              child: const Center(
+                                                child: Text(
+                                                  '',
+                                                  style: TextStyle(
+                                                    fontWeight: FontWeight.bold,
+                                                    fontSize: 16,
                                                     color: Color(0xFF2C2C2C),
-                                                    width: 1.0,
                                                   ),
                                                 ),
                                               ),
-                                              padding: const EdgeInsets.all(8),
-                                              child: SingleChildScrollView(
-                                                child: Column(
-                                                  crossAxisAlignment: CrossAxisAlignment.center,
-                                                  mainAxisAlignment: MainAxisAlignment.center,
-                                                  children: [
-                                                    // Show individual scores with edit functionality
-                                                    if (playerScores.isNotEmpty)
-                                                      ...playerScores.asMap().entries.map((scoreEntry) {
-                                                        final scoreIndex = scoreEntry.key;
-                                                        final score = scoreEntry.value;
-                                                        return GestureDetector(
-                                                          onTap: () => _editScore(round, player, scoreIndex),
-                                                          child: Container(
-                                                            padding: const EdgeInsets.symmetric(vertical: 2),
-                                                            child: Text(
-                                                              '${score.score}',
+                                            ),
+                                            // Team name columns
+                                            ...game.players.map((player) {
+                                              return Container(
+                                                width: _getColumnWidth(player),
+                                                child: Center(
+                                                  child: isEditMode
+                                                      ? Column(
+                                                          mainAxisAlignment: MainAxisAlignment.center,
+                                                          children: [
+                                                            Text(
+                                                              player.name.length > 20 
+                                                                  ? '${player.name.substring(0, 20)}...' 
+                                                                  : player.name,
                                                               style: const TextStyle(
+                                                                fontWeight: FontWeight.bold,
                                                                 fontSize: 16,
-                                                                fontWeight: FontWeight.w500,
                                                                 color: Color(0xFF2C2C2C),
                                                               ),
                                                               textAlign: TextAlign.center,
+                                                              maxLines: 2,
+                                                              overflow: TextOverflow.ellipsis,
                                                             ),
+                                                            const SizedBox(height: 1),
+                                                            CupertinoButton(
+                                                              padding: EdgeInsets.zero,
+                                                              child: const Icon(
+                                                                CupertinoIcons.delete,
+                                                                size: 16,
+                                                                color: CupertinoColors.destructiveRed,
+                                                              ),
+                                                              onPressed: () => _deleteTeam(player),
+                                                            ),
+                                                          ],
+                                                        )
+                                                      : Text(
+                                                          player.name.length > 20 
+                                                                  ? '${player.name.substring(0, 20)}...' 
+                                                                  : player.name,
+                                                          style: const TextStyle(
+                                                            fontWeight: FontWeight.bold,
+                                                            fontSize: 16,
+                                                            color: Color(0xFF2C2C2C),
                                                           ),
-                                                        );
-                                                      }).toList(),
-                                                    
-                                                    // Add score button
-                                                    GestureDetector(
-                                                      onTap: () => _addScore(round, player),
-                                                      child: const Icon(
-                                                        CupertinoIcons.plus_circle,
-                                                        size: 20,
-                                                        color: Color(0xFF8B8B8B),
+                                                          textAlign: TextAlign.center,
+                                                          maxLines: 2,
+                                                          overflow: TextOverflow.ellipsis,
+                                                        ),
+                                                ),
+                                              );
+                                            }).toList(),
+                                          ],
+                                        ),
+                                      ),
+                                      
+                                      // Rounds content
+                                      ...List.generate(game.rounds.length * 2, (index) {
+                                        final roundIndex = index ~/ 2;
+                                        final isSubtotal = index % 2 == 1;
+                                        final round = game.rounds[roundIndex];
+                                      
+                                        if (isSubtotal) {
+                                          // Subtotal row - fixed height since it only contains one value
+                                          final rowHeight = 40.0;
+                                          
+                                          return Container(
+                                            height: rowHeight,
+                                            child: Row(
+                                              children: [
+                                                // Subtotal label
+                                                Container(
+                                                  width: 100,
+                                                  child: const Center(
+                                                    child: Text(
+                                                      'Total',
+                                                      style: TextStyle(
+                                                        fontWeight: FontWeight.bold,
+                                                        fontSize: 14,
+                                                        color: Color(0xFF2C2C2C),
                                                       ),
                                                     ),
-                                                  ],
+                                                  ),
                                                 ),
-                                              ),
+                                                // Subtotal values
+                                                ...game.players.map((player) {
+                                                  return Container(
+                                                    width: _getColumnWidth(player),
+                                                                                                      child: Padding(
+                                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                                    child: Text(
+                                                      '${_calculateRoundSubtotal(round, player)}',
+                                                      style: const TextStyle(
+                                                        fontWeight: FontWeight.bold,
+                                                        fontSize: 16,
+                                                        color: Color(0xFF2C2C2C),
+                                                      ),
+                                                      textAlign: TextAlign.end,
+                                                    ),
+                                                  ),
+                                                  );
+                                                }).toList(),
+                                              ],
                                             ),
                                           );
-                                        }).toList(),
-                                      ],
-                                    ),
-                                  );
-                                }
-                              }),
+                                        } else {
+                                          // Scores row
+                                          final maxScores = game.players.fold<int>(0, (max, player) {
+                                            final playerScores = round.scores[player.id] ?? [];
+                                            return playerScores.length > max ? playerScores.length : max;
+                                          });
+                                          
+                                          final rowHeight = math.max(isEditMode ? 80.0 : 60.0, maxScores * 22.0);
+                                          
+                                          return Container(
+                                            height: rowHeight,
+                                            child: Row(
+                                              children: [
+                                                // Round label
+                                                Container(
+                                                  width: 100,
+                                                  child: Center(
+                                                    child: isEditMode
+                                                        ? Column(
+                                                            mainAxisAlignment: MainAxisAlignment.center,
+                                                            children: [
+                                                              Text(
+                                                                'Round ${round.roundNumber}',
+                                                                style: const TextStyle(
+                                                                  fontWeight: FontWeight.bold,
+                                                                  fontSize: 14,
+                                                                  color: Color(0xFF2C2C2C),
+                                                                ),
+                                                              ),
+                                                              const SizedBox(height: 1),
+                                                              CupertinoButton(
+                                                                padding: EdgeInsets.zero,
+                                                                child: const Icon(
+                                                                  CupertinoIcons.delete,
+                                                                  size: 16,
+                                                                  color: CupertinoColors.destructiveRed,
+                                                                ),
+                                                                onPressed: () => _deleteRound(round),
+                                                              ),
+                                                            ],
+                                                          )
+                                                        : Text(
+                                                            'Round ${round.roundNumber}',
+                                                            style: const TextStyle(
+                                                              fontWeight: FontWeight.bold,
+                                                              fontSize: 14,
+                                                              color: Color(0xFF2C2C2C),
+                                                            ),
+                                                          ),
+                                                  ),
+                                                ),
+                                                // Score cells
+                                                ...game.players.map((player) {
+                                                  final playerScores = round.scores[player.id] ?? [];
+                                                  return Container(
+                                                    width: _getColumnWidth(player),
+                                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+
+                                                    child: Row(
+                                                      crossAxisAlignment: CrossAxisAlignment.center,
+                                                      children: [
+                                                        // Add score button on the left
+                                                        GestureDetector(
+                                                          onTap: () => _addScore(round, player),
+                                                          child: const Icon(
+                                                            CupertinoIcons.plus_circle,
+                                                            size: 20,
+                                                            color: Color(0xFF8B8B8B),
+                                                          ),
+                                                        ),
+                                                        const SizedBox(width: 8),
+                                                        // Scores on the right
+                                                        Expanded(
+                                                          child: Column(
+                                                            crossAxisAlignment: CrossAxisAlignment.end,
+                                                            mainAxisAlignment: MainAxisAlignment.start,
+                                                            children: [
+                                                              // Show individual scores with edit functionality
+                                                              if (playerScores.isNotEmpty)
+                                                                ...playerScores.asMap().entries.map((scoreEntry) {
+                                                                  final scoreIndex = scoreEntry.key;
+                                                                  final score = scoreEntry.value;
+                                                                  return GestureDetector(
+                                                                    onTap: () => _editScore(round, player, scoreIndex),
+                                                                    child: Container(
+                                                                      padding: const EdgeInsets.symmetric(vertical: 0.5),
+                                                                      child: Text(
+                                                                        '${score.score}',
+                                                                        style: const TextStyle(
+                                                                          fontSize: 16,
+                                                                          fontWeight: FontWeight.w500,
+                                                                          color: Color(0xFF2C2C2C),
+                                                                        ),
+                                                                        textAlign: TextAlign.end,
+                                                                      ),
+                                                                    ),
+                                                                  );
+                                                                }).toList(),
+                                                            ],
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  );
+                                                }).toList(),
+                                              ],
+                                            ),
+                                          );
+                                        }
+                                      }),
+                                    ],
+                                  ),
+                                ),
+                              ),
                             ),
-                    ),
-                    
-                    // Add Round button
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      child: CupertinoButton.filled(
-                        child: const Text('Add Round'),
-                        onPressed: _addNewRound,
+                          ),
+                  ),
+                  
+                  // Sticky Add Round button
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFFEFEFE),
+                      border: Border(
+                        top: BorderSide(
+                          color: Color(0xFF2C2C2C),
+                          width: 1.0,
+                        ),
                       ),
                     ),
-                  ],
-                ),
+                    child: isEditMode
+                        ? Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              CupertinoButton.filled(
+                                child: const Text('Add Round'),
+                                onPressed: _addNewRound,
+                              ),
+                              CupertinoButton(
+                                child: const Text('Delete Game'),
+                                onPressed: _deleteGame,
+                              ),
+                            ],
+                          )
+                        : CupertinoButton.filled(
+                            child: const Text('Add Round'),
+                            onPressed: _addNewRound,
+                          ),
+                  ),
+                ],
               ),
       ),
     );
   }
+}
+
+class TableGridPainter extends CustomPainter {
+  final List<Player> players;
+  final List<Round> rounds;
+  final double Function(Player) getColumnWidth;
+  final bool isEditMode;
+
+  TableGridPainter({
+    required this.players,
+    required this.rounds,
+    required this.getColumnWidth,
+    required this.isEditMode,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = const Color(0xFF2C2C2C)
+      ..strokeWidth = 1.0
+      ..style = PaintingStyle.stroke;
+
+    final boldPaint = Paint()
+      ..color = const Color(0xFF2C2C2C)
+      ..strokeWidth = 2.0
+      ..style = PaintingStyle.stroke;
+
+    // Calculate column positions
+    double currentX = 100.0; // First column (round labels) is 100px wide
+    
+    // Draw vertical lines (excluding the rightmost line)
+    for (int i = 0; i < players.length; i++) {
+      final lineX = currentX;
+      
+      // Draw continuous vertical line from top to bottom
+      canvas.drawLine(
+        Offset(lineX, 0),
+        Offset(lineX, size.height),
+        i == 0 ? boldPaint : paint, // First line (after round labels) is bold
+      );
+      
+      currentX += getColumnWidth(players[i]);
+    }
+
+    // Draw horizontal lines
+    final headerHeight = isEditMode ? 90.0 : 60.0;
+    double currentY = headerHeight; // Header height
+    
+    // Header bottom border (bold)
+    canvas.drawLine(
+      Offset(0, currentY),
+      Offset(size.width, currentY),
+      boldPaint,
+    );
+
+    // Draw horizontal lines for each round and subtotal (excluding the bottom line)
+    for (int i = 0; i < rounds.length * 2; i++) {
+      final roundIndex = i ~/ 2;
+      final isSubtotal = i % 2 == 1;
+      final round = rounds[roundIndex];
+      
+      if (isSubtotal) {
+        // Top border of subtotal row
+        canvas.drawLine(
+          Offset(0, currentY),
+          Offset(size.width, currentY),
+          paint,
+        );
+        
+        // Fixed height for subtotal row since it only contains one value
+        final rowHeight = 40.0;
+        currentY += rowHeight;
+        
+        // Only draw bottom border if this isn't the last subtotal row
+        if (i < rounds.length * 2 - 1) {
+          canvas.drawLine(
+            Offset(0, currentY),
+            Offset(size.width, currentY),
+            paint,
+          );
+        }
+      } else {
+        // Scores row
+        final maxScores = players.fold<int>(0, (max, player) {
+          final playerScores = round.scores[player.id] ?? [];
+          return playerScores.length > max ? playerScores.length : max;
+        });
+        
+        final rowHeight = math.max(60.0, maxScores * 22.0);
+        currentY += rowHeight;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
